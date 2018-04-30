@@ -7,6 +7,8 @@ globalVariables(c(".", "eid", "pair", "ibs0", "kinship", "category_related", "pe
 #'
 #' @param fileset The prefix for a UKB fileset, e.g., ukbxxxx (for ukbxxxx.tab, ukbxxxx.r, ukbxxxx.html)
 #' @param path The path to the directory containing your UKB fileset. The default value is the current directory.
+#' @param chunk
+#' @param chunk.size
 #' @param data.pos Locates the data in your .html file. The .html file is read into a list; the default value data.pos = 2 indicates the second item in the list. (The first item in the list is the title of the table). You will probably not need to change this value, but if the need arises you can open the .html file in a browser and identify where in the file the data is.
 #'
 #' @details The \strong{index} and \strong{array} from the UKB field code are preserved in the variable name, as two numbers separated by underscores at the end of the name e.g. \emph{variable_index_array}. \strong{index} refers the assessment instance (or visit). \strong{array} captures multiple answers to the same "question". See UKB documentation for detailed descriptions of \href{http://biobank.ctsu.ox.ac.uk/crystal/instance.cgi?id=2}{index} and \href{http://biobank.ctsu.ox.ac.uk/crystal/help.cgi?cd=array}{array}.
@@ -17,6 +19,7 @@ globalVariables(c(".", "eid", "pair", "ibs0", "kinship", "category_related", "pe
 #'
 #' @import XML stringr
 #' @importFrom data.table fread
+#' @importFrom magrittr "%>%"
 #' @export
 #'
 #' @examples
@@ -40,23 +43,58 @@ globalVariables(c(".", "eid", "pair", "ibs0", "kinship", "category_related", "pe
 #' )
 #' }
 #'
-ukb_df <- function(fileset, path = ".", data.pos = 2) {
+ukb_df <- function(fileset, path = ".", chunk = FALSE, chunk.size = 250000, data.pos = 2) {
   html_file <- stringr::str_interp("${fileset}.html")
   r_file <- stringr::str_interp("${fileset}.r")
   tab_file <- stringr::str_interp("${fileset}.tab")
+  edit_date <- Sys.time()
+
+  # Update path to tab file in R source
+
+  if(path == ".") {
+    tab_location <- file.path(getwd(), tab_file)
+    r_location <- file.path(getwd(), r_file)
+  } else {
+    tab_location <- file.path(path, tab_file)
+    r_location <- file.path(path, r_file)
+  }
 
   # Column types as described by UKB
   # http://biobank.ctsu.ox.ac.uk/crystal/help.cgi?cd=value_type
-  col_type <- c("Sequence" = "integer", "Integer" = "integer", "Categorical (single)" = "character",
+  ukb_col_type <- c("Sequence" = "integer", "Integer" = "integer", "Categorical (single)" = "character",
                 "Categorical (multiple)" = "character", "Continuous" = "double", "Text" = "character",
                 "Date" = "character", "Time" = "character", "Compound" = "character",
                 "Binary object" = "character", "Records" = "character")
 
-  df <- ukb_df_field(fileset, path = path) %>%
-    mutate(fread_column_type = col_type[col.type])
+  key <- ukb_df_field(fileset, path = path) %>%
+    mutate(read_column_type = ukb_col_type[col.type])
 
-  .update_tab_path(fileset, column_type = df$fread_column_type, path)
+  column_type <- key$read_column_type %>% stringr::str_c()
 
+  column_type_readr <- str_sub(key$read_column_type, end = 1L) %>%
+    stringr::str_c(collapse = "")
+
+  # readr::read_delim_chunked callback function
+  .return_df <- function(x, pos) x
+
+  read_func_edit <- ifelse(
+    chunk,
+    stringr::str_interp(
+"# Read function edited by ukbtools ${edit_date}
+bd <- readr::read_delim_chunked('${file.path(path, tab_file)}', delim = '\t', callback =  DataFrameCallback$new(.return_df), chunk_size = ${chunk.size}, col_type = '${column_type_readr}')\n"
+    ),
+    stringr::str_interp(
+"# Read function edited by ukbtools ${edit_date}
+bd <- data.table::fread('${file.path(path, tab_file)}', sep = '\t', header = TRUE, colClasses = ${column_type}, data.table = FALSE)\n")
+  )
+
+  f <- gsub(
+    "bd *<-.*read.*$",
+    read_func_edit,
+    readLines(r_location)
+  )
+
+  cat(f, file = r_location, sep = "\n")
 
   source(
     if (path == ".") {
@@ -67,9 +105,10 @@ ukb_df <- function(fileset, path = ".", data.pos = 2) {
     local = TRUE
   )
 
-  names(bd) <- df$col.name[match(names(bd), df$field.tab)]
+  names(bd) <- key$col.name[match(names(bd), key$field.tab)]
   return(bd)
 }
+
 
 
 
@@ -207,7 +246,7 @@ ukb_df_field <- function(fileset, path = ".", data.pos = 2, as.lookup = FALSE) {
   edit_date <- Sys.time()
 
   f <- gsub(
-    "bd.*read\\.delim.*$" ,
+    "bd *<- *read.*$",
     stringr::str_interp(
 "# Read function edited by ukbtools ${edit_date}
 bd <- data.table::fread('${file.path(path, tab_file)}', sep = '\t', header = TRUE, colClasses = ${column_type}, data.table = FALSE)\n"),
